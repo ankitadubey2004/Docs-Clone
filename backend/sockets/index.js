@@ -1,11 +1,12 @@
 const socketIO = require('socket.io');
+const mergeDelta = require('../utils/mergeDelta'); // <-- import
 
 module.exports = (server) => {
   const io = socketIO(server, { cors: { origin: '*' } });
 
   io.on('connection', (socket) => {
     socket.on('join', ({ docId, userId }) => {
-      socket.userId = userId; // Store for presence/chat
+      socket.userId = userId;
       socket.join(docId);
 
       // Presence: Get all users in room
@@ -18,8 +19,16 @@ module.exports = (server) => {
       io.to(docId).emit('presence', users);
     });
 
-    socket.on('delta', ({ docId, delta }) => {
-      socket.broadcast.to(docId).emit('delta', delta);
+    // 🔹 Delta with merge
+    socket.on('delta', async ({ docId, delta }) => {
+      try {
+        const merged = await mergeDelta(docId, delta);
+        
+        // Broadcast merged content (instead of raw delta)
+        socket.broadcast.to(docId).emit('delta', merged);
+      } catch (err) {
+        console.error('Delta merge failed:', err);
+      }
     });
 
     socket.on('cursor', ({ docId, position }) => {
