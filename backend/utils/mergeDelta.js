@@ -1,5 +1,5 @@
 // utils/mergeDelta.js
-const Version = require('../models/version');
+const Version = require('../models/Version');
 const OperationalTransform = require('./operationalTransform');
 
 async function mergeDelta(docId, newDelta) {
