@@ -12,7 +12,7 @@ export const AuthProvider = ({ children }) => {
   const [loading, setLoading] = useState(true);
 
   // Set base URL for API requests
-  axios.defaults.baseURL = 'http://localhost:5000';
+  axios.defaults.baseURL = import.meta.env.VITE_BACKEND_URL;
 
   useEffect(() => {
     const token = localStorage.getItem('token');

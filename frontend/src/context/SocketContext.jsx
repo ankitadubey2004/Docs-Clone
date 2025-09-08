@@ -13,7 +13,10 @@ export const SocketProvider = ({ children }) => {
     const token = localStorage.getItem('token');
     if (!currentUser || !token) return;
 
-    const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+    const backendUrl = import.meta.env.VITE_BACKEND_URL;
+    // const backendUrl = import.meta.env.VITE_BACKEND_URL || 'http://localhost:5000';
+
+
 
     const s = io(backendUrl, {
       auth: { token: `Bearer ${token}` },
