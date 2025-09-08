@@ -1,7 +1,12 @@
+// models/Document.js
 const mongoose = require('mongoose');
 
 const documentVersionSchema = new mongoose.Schema({
-  content: {
+  delta: {
+    type: Object,
+    default: null
+  },
+  html: {
     type: String,
     default: ''
   },
@@ -20,9 +25,15 @@ const documentSchema = new mongoose.Schema({
     type: String,
     required: true
   },
+  // Backwards-compatible HTML content (for exports / older clients)
   content: {
     type: String,
     default: ''
+  },
+  // Quill Delta JSON (recommended)
+  contentDelta: {
+    type: Object,
+    default: { ops: [] }
   },
   owner: {
     type: mongoose.Schema.Types.ObjectId,
@@ -38,6 +49,10 @@ const documentSchema = new mongoose.Schema({
       type: String,
       enum: ['editor', 'viewer'],
       default: 'viewer'
+    },
+    lastSeen: {
+      type: Date,
+      default: Date.now
     }
   }],
   versions: [documentVersionSchema],
@@ -49,7 +64,6 @@ const documentSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Index for better performance
 documentSchema.index({ owner: 1, createdAt: -1 });
 documentSchema.index({ 'collaborators.user': 1 });
 

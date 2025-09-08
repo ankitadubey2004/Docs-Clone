@@ -9,38 +9,38 @@ import Dashboard from './pages/Dashboard';
 import Document from './pages/Document';
 import DocumentSettings from './pages/DocumentSettings';
 import './index.css';
-import Navigation from './components/Navigation';
 
 function App() {
   return (
-    <Router>
-      <AuthProvider>
-        <SocketProvider>
-          <div className="min-h-screen bg-gray-50">
-            <Routes>
-              <Route path="/login" element={<Login />} />
-              <Route path="/register" element={<Register />} />
-              <Route path="/" element={
-                <ProtectedRoute>
-                   <Navigation />
-                  <Dashboard />
-                </ProtectedRoute>
-              } />
-              <Route path="/document/:id" element={
-                <ProtectedRoute>
-                  <Document />
-                </ProtectedRoute>
-              } />
-              <Route path="/document/:id/settings" element={
-                <ProtectedRoute>
-                  <DocumentSettings />
-                </ProtectedRoute>
-              } />
-            </Routes>
-          </div>
-        </SocketProvider>
-      </AuthProvider>
-    </Router>
+   
+      <Router>
+        <AuthProvider>
+          <SocketProvider>
+            <div className="min-h-screen bg-gray-50">
+              <Routes>
+                <Route path="/login" element={<Login />} />
+                <Route path="/register" element={<Register />} />
+                <Route path="/" element={
+                  <ProtectedRoute>
+                    <Dashboard />
+                  </ProtectedRoute>
+                } />
+                <Route path="/document/:id" element={
+                  <ProtectedRoute>
+                    <Document />
+                  </ProtectedRoute>
+                } />
+                <Route path="/document/:id/settings" element={
+                  <ProtectedRoute>
+                    <DocumentSettings />
+                  </ProtectedRoute>
+                } />
+              </Routes>
+            </div>
+          </SocketProvider>
+        </AuthProvider>
+      </Router>
+ 
   );
 }
 

@@ -1,10 +1,37 @@
 const express = require('express');
 const Document = require('../models/Document');
 const { authenticateToken, authorizeRoles } = require('../middleware/auth');
+const { QuillDeltaToHtmlConverter } = require('quill-delta-to-html');
+const { Document: DocxDocument, Packer, Paragraph, TextRun } = require('docx');
+const pdf = require('html-pdf');
+const { JSDOM } = require('jsdom');
 
 const router = express.Router();
 
-// Get all documents for user
+// Function to safely check document access
+const checkDocumentAccess = async (documentId, userId) => {
+  const document = await Document.findById(documentId)
+    .populate('owner', 'id username')
+    .populate('collaborators.user', 'id username');
+
+  if (!document) return { hasAccess: false, canEdit: false, document: null };
+
+  const isOwner = document.owner?._id?.toString() === userId.toString();
+  const collaborator = document.collaborators?.find(
+    c => c.user?._id?.toString() === userId.toString()
+  );
+  const isEditor = collaborator?.role === 'editor';
+  const isViewer = collaborator?.role === 'viewer';
+  const isPublic = document.isPublic;
+
+  return {
+    hasAccess: isOwner || isEditor || isViewer || isPublic,
+    canEdit: isOwner || isEditor,
+    document
+  };
+};
+
+// Get all documents accessible to the user
 router.get('/', authenticateToken, async (req, res) => {
   try {
     const documents = await Document.find({
@@ -14,37 +41,27 @@ router.get('/', authenticateToken, async (req, res) => {
         { isPublic: true }
       ]
     }).populate('owner', 'username').populate('collaborators.user', 'username');
-    
-    res.json(documents);
+
+    res.json(documents || []);
   } catch (error) {
     console.error('Error fetching documents:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
-// Get single document
+// Get a single document
 router.get('/:id', authenticateToken, async (req, res) => {
   try {
-    const document = await Document.findOne({
-      _id: req.params.id,
-      $or: [
-        { owner: req.user._id },
-        { 'collaborators.user': req.user._id },
-        { isPublic: true }
-      ]
-    }).populate('owner', 'username').populate('collaborators.user', 'username');
-    
-    if (!document) {
-      return res.status(404).json({ message: 'Document not found' });
-    }
-    
-    // Check if user has edit permissions
-    const canEdit = document.owner._id.toString() === req.user._id.toString() || 
-                   document.collaborators.some(c => 
-                     c.user._id.toString() === req.user._id.toString() && c.role === 'editor'
-                   );
-    
-    res.json({ ...document.toObject(), canEdit });
+    const { hasAccess, canEdit, document } = await checkDocumentAccess(req.params.id, req.user._id);
+
+    if (!document || !hasAccess) return res.status(404).json({ message: 'Document not found' });
+
+    res.json({
+      ...document.toObject(),
+      canEdit,
+      contentDelta: document.contentDelta || { ops: [] },
+      content: document.content || ''
+    });
   } catch (error) {
     console.error('Error fetching document:', error);
     res.status(500).json({ message: 'Server error' });
@@ -54,16 +71,19 @@ router.get('/:id', authenticateToken, async (req, res) => {
 // Create a new document
 router.post('/', authenticateToken, authorizeRoles('admin', 'editor'), async (req, res) => {
   try {
-    const { title, content, isPublic } = req.body;
-    
+    const { title, content, contentDelta, isPublic } = req.body;
+
     const document = new Document({
       title,
-      content,
+      content: content || '',
+      contentDelta: contentDelta || { ops: [] },
       owner: req.user._id,
       isPublic
     });
-    
+
     await document.save();
+    await document.populate('owner', 'username');
+
     res.status(201).json(document);
   } catch (error) {
     console.error('Error creating document:', error);
@@ -74,31 +94,32 @@ router.post('/', authenticateToken, authorizeRoles('admin', 'editor'), async (re
 // Update document
 router.put('/:id', authenticateToken, async (req, res) => {
   try {
-    const { content, title } = req.body;
-    
-    const document = await Document.findOne({
-      _id: req.params.id,
-      $or: [
-        { owner: req.user._id },
-        { 'collaborators.user': req.user._id, 'collaborators.role': 'editor' }
-      ]
+    const { content, contentDelta, title } = req.body;
+    const { hasAccess, canEdit, document } = await checkDocumentAccess(req.params.id, req.user._id);
+
+    if (!document || !hasAccess || !canEdit) return res.status(404).json({ message: 'Document not found or insufficient permissions' });
+
+    document.versions.push({
+      delta: document.contentDelta || null,
+      html: document.content || '',
+      editedBy: req.user._id,
+      timestamp: new Date()
     });
-    
-    if (!document) {
-      return res.status(404).json({ message: 'Document not found or insufficient permissions' });
-    }
-    
-    // Save current version before updating if content changed
-    if (content && content !== document.content) {
-      document.versions.push({
-        content: document.content,
-        editedBy: req.user._id
-      });
-    }
-    
+
     if (title) document.title = title;
-    if (content) document.content = content;
-    
+
+    if (contentDelta) {
+      document.contentDelta = contentDelta;
+      try {
+        const converter = new QuillDeltaToHtmlConverter(contentDelta.ops || [], {});
+        document.content = converter.convert();
+      } catch (err) {
+        console.warn('Delta->HTML conversion failed', err);
+      }
+    } else if (typeof content === 'string') {
+      document.content = content;
+    }
+
     await document.save();
     res.json(document);
   } catch (error) {
@@ -111,24 +132,14 @@ router.put('/:id', authenticateToken, async (req, res) => {
 router.post('/:id/collaborators', authenticateToken, async (req, res) => {
   try {
     const { userId, role } = req.body;
-    
-    const document = await Document.findOne({
-      _id: req.params.id,
-      owner: req.user._id
-    });
-    
-    if (!document) {
-      return res.status(404).json({ message: 'Document not found or insufficient permissions' });
-    }
-    
-    // Check if user is already a collaborator
-    const existingCollaborator = document.collaborators.find(c => c.user.toString() === userId);
-    if (existingCollaborator) {
-      existingCollaborator.role = role;
-    } else {
-      document.collaborators.push({ user: userId, role });
-    }
-    
+    const document = await Document.findOne({ _id: req.params.id, owner: req.user._id });
+
+    if (!document) return res.status(404).json({ message: 'Document not found or insufficient permissions' });
+
+    const existingCollaborator = document.collaborators?.find(c => c.user?.toString() === userId);
+    if (existingCollaborator) existingCollaborator.role = role;
+    else document.collaborators.push({ user: userId, role });
+
     await document.save();
     res.json(document);
   } catch (error) {
@@ -140,19 +151,10 @@ router.post('/:id/collaborators', authenticateToken, async (req, res) => {
 // Remove collaborator
 router.delete('/:id/collaborators/:userId', authenticateToken, async (req, res) => {
   try {
-    const document = await Document.findOne({
-      _id: req.params.id,
-      owner: req.user._id
-    });
-    
-    if (!document) {
-      return res.status(404).json({ message: 'Document not found or insufficient permissions' });
-    }
-    
-    document.collaborators = document.collaborators.filter(
-      c => c.user.toString() !== req.params.userId
-    );
-    
+    const document = await Document.findOne({ _id: req.params.id, owner: req.user._id });
+    if (!document) return res.status(404).json({ message: 'Document not found or insufficient permissions' });
+
+    document.collaborators = document.collaborators?.filter(c => c.user?.toString() !== req.params.userId);
     await document.save();
     res.json(document);
   } catch (error) {
@@ -161,22 +163,26 @@ router.delete('/:id/collaborators/:userId', authenticateToken, async (req, res) 
   }
 });
 
-// Delete document
+// Delete document (Owner or Admin)
 router.delete('/:id', authenticateToken, async (req, res) => {
   try {
-    const document = await Document.findOne({
-      _id: req.params.id,
-      owner: req.user._id
-    });
-    
-    if (!document) {
-      return res.status(404).json({ message: 'Document not found or insufficient permissions' });
+    const doc = await Document.findById(req.params.id);
+    if (!doc) return res.status(404).json({ message: 'Document not found' });
+
+    const userId = req.user.id;
+
+    // Allow delete if current user is document owner or admin
+    const isOwner = doc.owner.toString() === userId;
+    const isAdmin = req.user.role === 'admin';
+
+    if (!isOwner && !isAdmin) {
+      return res.status(403).json({ message: 'Forbidden: Cannot delete this document' });
     }
-    
-    await Document.findByIdAndDelete(req.params.id);
-    res.json({ message: 'Document deleted successfully' });
-  } catch (error) {
-    console.error('Error deleting document:', error);
+
+    await doc.deleteOne(); // Delete document
+    res.status(200).json({ message: 'Document deleted successfully' });
+  } catch (err) {
+    console.error('Delete document error:', err);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -185,35 +191,48 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 router.get('/:id/export', authenticateToken, async (req, res) => {
   try {
     const { format } = req.query;
-    const document = await Document.findOne({
-      _id: req.params.id,
-      $or: [
-        { owner: req.user._id },
-        { 'collaborators.user': req.user._id },
-        { isPublic: true }
-      ]
-    });
-    
-    if (!document) {
-      return res.status(404).json({ message: 'Document not found' });
-    }
-    
+    const { hasAccess, document } = await checkDocumentAccess(req.params.id, req.user._id);
+
+    if (!document || !hasAccess) return res.status(404).json({ message: 'Document not found' });
+
+    const html = document.content || '';
+
     if (format === 'pdf') {
-      // Set headers for PDF download
       res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Content-Disposition', `attachment; filename=${document.title}.pdf`);
-      
-      // In a real implementation, you would use a library like pdfkit or html-pdf
-      // to convert the document content to PDF format
-      // For now, we'll just send the text content
-      res.send(document.content);
+      res.setHeader('Content-Disposition', `attachment; filename="${document.title}.pdf"`);
+      pdf.create(html).toStream((err, stream) => {
+        if (err) return res.status(500).send('PDF generation error');
+        stream.pipe(res);
+      });
     } else if (format === 'word') {
-      // Set headers for Word download
       res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document');
-      res.setHeader('Content-Disposition', `attachment; filename=${document.title}.docx`);
-      
-      // In a real implementation, you would use a library to convert to Word format
-      res.send(document.content);
+      res.setHeader('Content-Disposition', `attachment; filename="${document.title}.docx"`);
+
+      // Convert HTML to basic Word paragraphs preserving bold/italic/underline
+      const dom = new JSDOM(html);
+      const paragraphs = Array.from(dom.window.document.body.children).map(node => {
+        const runs = [];
+
+        node.childNodes.forEach(n => {
+          if (n.nodeType === 3) runs.push(new TextRun({ text: n.textContent }));
+          else if (n.nodeType === 1) {
+            const style = {};
+            if (n.tagName === 'B' || n.tagName === 'STRONG') style.bold = true;
+            if (n.tagName === 'I' || n.tagName === 'EM') style.italics = true;
+            if (n.tagName === 'U') style.underline = {};
+            runs.push(new TextRun({ text: n.textContent, ...style }));
+          }
+        });
+
+        return new Paragraph({ children: runs.length ? runs : [new TextRun({ text: node.textContent })] });
+      });
+
+      const doc = new DocxDocument({
+        sections: [{ children: paragraphs.length ? paragraphs : [new Paragraph('')] }]
+      });
+
+      const buffer = await Packer.toBuffer(doc);
+      res.send(buffer);
     } else {
       res.status(400).json({ message: 'Unsupported format' });
     }
